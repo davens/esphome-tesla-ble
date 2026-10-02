@@ -1,0 +1,82 @@
+# M5Stack ATOM Lite front button, so nobody needs the phone when unplugging in a rush:
+#   single click - stop charging
+#   double click - release the charge cable, like the button on the charge handle
+# Both act only while the charge-port flap is open. The flap comes from the VCSEC poll,
+# which runs every 10 s; the charging state comes from infotainment polls, which stop
+# after 11 idle minutes so the car can sleep, so it is too stale to gate on. Stopping a
+# car that is not charging, or releasing an empty port, is harmless.
+# The RGB LED confirms: blue = stop sent, green = release sent, red = flap closed.
+# ATOM Lite pins: button GPIO39 (external pull-up, active low), SK6812 on GPIO27.
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: atom_led
+    pin: GPIO27
+    num_leds: 1
+    chipset: SK6812
+    rgb_order: GRB
+    internal: true
+
+script:
+  - id: led_blink
+    mode: restart
+    parameters:
+      r: float
+      g: float
+      b: float
+      times: int
+    then:
+      - repeat:
+          count: !lambda return times;
+          then:
+            - light.turn_on: {id: atom_led, brightness: 60%, red: !lambda return r;, green: !lambda return g;, blue: !lambda return b;, transition_length: 0s}
+            - delay: 250ms
+            - light.turn_off: {id: atom_led, transition_length: 0s}
+            - delay: 200ms
+
+binary_sensor:
+  - platform: gpio
+    id: atom_button
+    name: "Button"
+    entity_category: diagnostic
+    pin:
+      number: GPIO39
+      inverted: true
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+    on_multi_click:
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 0.4s
+          - ON for at most 1s
+          - OFF for at least 0.2s
+        then:
+          - if:
+              condition:
+                lambda: return flap_is_open();
+              then:
+                - logger.log: "Button double click: releasing charge cable"
+                - lambda: id(tesla_ble_vehicle_id).unlock_charge_port();
+                - script.execute: {id: led_blink, r: 0.0, g: 1.0, b: 0.0, times: 2}
+                - delay: 5s
+                - lambda: id(tesla_ble_vehicle_id).force_update();
+              else:
+                - logger.log: "Button double click: charge flap closed, ignoring"
+                - script.execute: {id: led_blink, r: 1.0, g: 0.0, b: 0.0, times: 3}
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.4s
+        then:
+          - if:
+              condition:
+                lambda: return flap_is_open();
+              then:
+                - logger.log: "Button click: stopping charging"
+                - lambda: id(tesla_ble_vehicle_id).set_charging_state(false);
+                - script.execute: {id: led_blink, r: 0.0, g: 0.3, b: 1.0, times: 2}
+                - delay: 5s
+                - lambda: id(tesla_ble_vehicle_id).force_update();
+              else:
+                - logger.log: "Button click: charge flap closed, ignoring"
+                - script.execute: {id: led_blink, r: 1.0, g: 0.0, b: 0.0, times: 3}
